@@ -28,7 +28,7 @@ CHAT_ENDPOINT = os.getenv("CHAT_ENDPOINT", "https://iomp-backend.onrender.com/ch
 # Public base URL where this FastAPI app is reachable by Twilio.
 # Prefer env so the tunnel/domain can rotate without code changes.
 PUBLIC_BASE_URL = os.getenv(
-    "PUBLIC_BASE_URL", "https://bursiform-incommutably-stacy.ngrok-free.dev"
+    "PUBLIC_BASE_URL", "https://twiolio-customer-support.onrender.com"
 )
 if not PUBLIC_BASE_URL:
     logger.warning("PUBLIC_BASE_URL is not set; Twilio callbacks will fail.")
