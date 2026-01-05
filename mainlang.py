@@ -1,140 +1,54 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Gather
-import httpx
-import os
 
 app = FastAPI()
 
-# =========================
-# CONFIG
-# =========================
-BASE_URL = os.getenv("BASE_URL")   # set AFTER deployment
-CHAT_ENDPOINT = "https://iomp-backend.onrender.com/chat"
-LANGUAGE = "en-IN"
+@app.get("/")
+async def index():
+    return {"message": "LIC Voice Bot Running"}
 
+@app.post("/voice/answer")
+async def voice_answer():
+    resp = VoiceResponse()
+    resp.say("Welcome to LIC customer support. I am here to help you with your LIC related questions.")
+    resp.redirect("/voice/listen")
+    return Response(content=str(resp), media_type="application/xml")
 
-def twiml(vr: VoiceResponse):
-    return Response(str(vr), media_type="text/xml")
+@app.post("/voice/listen")
+async def voice_listen():
+    resp = VoiceResponse()
+    gather = Gather(input='speech', action='/voice/handle-question', timeout=3)
+    gather.say("Please ask your question.")
+    resp.append(gather)
+    resp.redirect("/voice/listen")
+    return Response(content=str(resp), media_type="application/xml")
 
+@app.post("/voice/handle-question")
+async def handle_question(request: Request, SpeechResult: str = Form(...)):
+    resp = VoiceResponse()
+    
+    # Logic to process SpeechResult goes here
+    print(f"User said: {SpeechResult}")
+    resp.say(f"I heard you say: {SpeechResult}. Here is the answer.")
 
-# =========================
-# CALL START – WELCOME
-# =========================
-@app.post("/voice")
-async def voice():
-    vr = VoiceResponse()
+    gather = Gather(input='speech', action='/voice/decision', timeout=3)
+    gather.say("Would you like to ask another question?")
+    resp.append(gather)
+    
+    resp.redirect("/voice/decision")
+    return Response(content=str(resp), media_type="application/xml")
 
-    gather = Gather(
-        input="speech",
-        action=f"{BASE_URL}/process",
-        method="POST",
-        language=LANGUAGE,
-        speech_timeout="auto",
-    )
+@app.post("/voice/decision")
+async def decision(request: Request, SpeechResult: str = Form(None)):
+    resp = VoiceResponse()
+    user_input = SpeechResult.lower() if SpeechResult else ""
 
-    gather.say(
-        "Welcome to LIC customer support. "
-        "I am here to help you with your LIC related questions. "
-        "Please ask your question after the beep."
-    )
+    if "yes" in user_input or "yeah" in user_input:
+        resp.say("Okay.")
+        resp.redirect("/voice/listen")
+    else:
+        resp.say("Thank you for calling LIC customer support. Have a great day. Goodbye.")
+        resp.hangup()
 
-    vr.append(gather)
-
-    # Fallback if caller stays silent
-    vr.say(
-        "I did not hear any question. "
-        "Thank you for calling LIC. Goodbye."
-    )
-    vr.hangup()
-
-    return twiml(vr)
-
-
-# =========================
-# PROCESS USER QUESTION
-# =========================
-@app.post("/process")
-async def process(request: Request):
-    form = await request.form()
-    speech = form.get("SpeechResult")
-
-    vr = VoiceResponse()
-
-    # If no speech detected
-    if not speech:
-        vr.say(
-            "Sorry, I could not hear you clearly. "
-            "Please call again if you need any help. Goodbye."
-        )
-        vr.hangup()
-        return twiml(vr)
-
-    # Get answer from chat backend
-    answer = await ask_chat(speech)
-
-    # Speak the answer
-    vr.say(answer)
-
-    # Ask follow-up question
-    gather = Gather(
-        input="speech",
-        action=f"{BASE_URL}/process",
-        method="POST",
-        language=LANGUAGE,
-        speech_timeout="auto",
-    )
-
-    gather.say(
-        "Would you like to ask another question? "
-        "You can speak now."
-    )
-
-    vr.append(gather)
-
-    # Final fallback if user stays silent again
-    vr.say(
-        "Thank you for calling LIC customer support. "
-        "Have a great day. Goodbye."
-    )
-    vr.hangup()
-
-    return twiml(vr)
-
-
-# =========================
-# CHAT BACKEND CALL
-# =========================
-async def ask_chat(question: str) -> str:
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                CHAT_ENDPOINT,
-                json={"question": question}
-            )
-
-            if response.status_code != 200:
-                return (
-                    "Sorry, I am unable to get the information right now. "
-                    "Please try again later."
-                )
-
-            data = response.json()
-            return data.get(
-                "answer",
-                "Sorry, I could not find the information for that question."
-            )
-
-    except Exception:
-        return (
-            "Sorry, something went wrong while answering your question. "
-            "Please try again later."
-        )
-
-
-# =========================
-# HEALTH CHECK
-# =========================
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+    return Response(content=str(resp), media_type="application/xml")
