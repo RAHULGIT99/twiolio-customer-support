@@ -207,5 +207,5 @@ async def _ask_chat(question: str) -> tuple[str, bool]:
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run("mainlang:app", host="0.0.0.0", port=8001, reload=True)
+    port = int(os.getenv("PORT", 8001))
+    uvicorn.run("mainlang:app", host="0.0.0.0", port=port)
