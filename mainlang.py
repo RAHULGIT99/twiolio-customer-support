@@ -1,3 +1,6 @@
+
+
+import os
 import httpx
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import Response
@@ -5,110 +8,142 @@ from twilio.twiml.voice_response import VoiceResponse, Gather
 
 app = FastAPI()
 
-# --- CONFIG ---
-CHAT_ENDPOINT = "https://iomp-backend.onrender.com/chat"
+# --- CONFIGURATION ---
+# TODO: Add your Groq API Key here or in .env
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_API_KEY_HERE")
+LIC_BACKEND_URL = "https://iomp-backend.onrender.com/chat"
 
-async def ask_chat(question: str) -> str:
-    print(f"Sending to backend: {question}") 
+# --- HELPER 1: INTENT ANALYSIS (GROQ) ---
+async def analyze_intent(user_text: str) -> str:
+    """
+    Uses Groq to classify if the user wants to END the conversation or ASK a question.
+    Returns: 'CALL_END' or 'CALL_CONTINUE'
+    """
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Strict System Prompt for Classification
+    system_prompt = (
+        "You are a call routing assistant. Your ONLY job is to classify the user's intent. "
+        "If the user says 'no', 'no thanks', 'bye', 'goodbye', 'nothing', 'that is all', or indicates they are done, output 'CALL_END'. "
+        "If the user asks a question, says 'yes', or wants information, output 'CALL_CONTINUE'. "
+        "Output ONLY one of these two strings. Do not add punctuation."
+    )
+
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text}
+        ],
+        "temperature": 0.0  # Set to 0 for strict classification
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code == 200:
+                result = response.json()["choices"][0]["message"]["content"].strip()
+                print(f"Groq Intent Analysis: {result}") # Debug log
+                return result
+            else:
+                print(f"Groq Error: {response.status_code}")
+                return "CALL_CONTINUE" # Default to continue if AI fails
+    except Exception as e:
+        print(f"Groq Exception: {e}")
+        return "CALL_CONTINUE"
+
+# --- HELPER 2: GET ANSWER (YOUR BACKEND) ---
+async def ask_lic_backend(question: str) -> str:
+    print(f"Sending to LIC Backend: {question}") 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
-                CHAT_ENDPOINT,
+                LIC_BACKEND_URL,
                 json={"question": question}
             )
             if response.status_code != 200:
-                return "Sorry, I am unable to connect to the server right now."
+                return "I am having trouble accessing the database right now."
             data = response.json()
-            return data.get("answer", "Sorry, I received an empty answer.")
-    except Exception as e:
-        print(f"Exception: {e}")
-        return "Sorry, there was a technical error."
+            return data.get("answer", "I didn't find an answer for that.")
+    except Exception:
+        return "Sorry, I am unable to connect to the server."
 
-# --- ROUTES ---
+# --- TWILIO ROUTES ---
 
 @app.get("/")
 async def index():
-    return {"message": "LIC Voice Bot Running"}
+    return {"message": "Smart Intent Bot Running"}
 
 @app.post("/voice/answer")
 async def voice_answer():
     resp = VoiceResponse()
     resp.pause(length=1)
     
-    # Enable Barge-in for the welcome message too
+    # Initial Welcome with Barge-In
     gather = Gather(input='speech', action='/voice/handle-input', timeout=60, speechTimeout='auto')
-    gather.say("Welcome to LIC customer support. I am here to help you. You can ask me anything, or interrupt me if I talk too much.")
+    gather.say("Welcome to LIC customer support. How can I help you today?")
     resp.append(gather)
     
-    # If they stay silent for 60s, go to the extension loop
     resp.redirect("/voice/wait-step-2")
-    
     return Response(content=str(resp), media_type="application/xml")
 
 @app.post("/voice/handle-input")
 async def handle_input(request: Request, SpeechResult: str = Form(None)):
     resp = VoiceResponse()
     
-    # 1. Handle Silence (If they just made noise but said nothing)
+    # 1. Handle Silence
     if not SpeechResult:
         resp.redirect("/voice/wait-step-2")
         return Response(content=str(resp), media_type="application/xml")
 
-    user_input = SpeechResult.lower().strip()
-    print(f"User said: {user_input}") 
+    print(f"User said: {SpeechResult}")
 
-    # 2. Smart Exit
-    exit_phrases = ["no", "no thanks", "nothing", "thank you", "bye", "stop", "exit", "cancel"]
-    if user_input in exit_phrases or user_input.startswith("no thanks"):
-        resp.say("Thank you for calling LIC. Goodbye.")
+    # 2. CALL GROQ TO ANALYZE INTENT
+    intent = await analyze_intent(SpeechResult)
+
+    # 3. DECISION LOGIC
+    if intent == "CALL_END":
+        resp.say("Thank you for calling LIC. Have a wonderful day. Goodbye.")
         resp.hangup()
         return Response(content=str(resp), media_type="application/xml")
 
-    # 3. Get Answer from Backend
-    ai_answer = await ask_chat(SpeechResult)
-    
-    # 4. OUTPUT THE ANSWER WITH BARGE-IN ENABLED
-    # We put the .say() INSIDE the Gather().
-    # This means if the user speaks while the bot is answering, the bot stops and the new input is captured.
+    # 4. IF CONTINUE: Get real answer from your backend
+    ai_answer = await ask_lic_backend(SpeechResult)
+
+    # 5. Speak Answer (With Barge-In enabled)
     gather = Gather(
         input='speech', 
         action='/voice/handle-input', 
-        timeout=60,  # Wait 60s after the bot finishes speaking
+        timeout=60, 
         speechTimeout='auto'
     )
     
-    # The bot speaks the answer. If user says "Stop, tell me about X", 
-    # Twilio cuts this off and sends "Stop, tell me about X" to /voice/handle-input
+    # Speak the answer
     gather.say(ai_answer)
     
-    # Add a small prompt at the end if the answer finishes completely
+    # Prompt for next turn
     gather.pause(length=1)
-    gather.say("You can ask another question, or just stay silent.")
+    gather.say("Do you have any other questions?")
     
     resp.append(gather)
-
-    # 5. If 60 seconds pass with silence, go to Step 2 (Wait more)
+    
+    # Fallback to wait loop
     resp.redirect("/voice/wait-step-2")
 
     return Response(content=str(resp), media_type="application/xml")
 
-# --- THE 2-MINUTE WAIT LOGIC ---
-
 @app.post("/voice/wait-step-2")
 async def wait_step_2():
-    """
-    This is reached if the user was silent for the first 60 seconds.
-    We give them ANOTHER 60 seconds.
-    """
+    """Wait loop: Adds another 60s listening time."""
     resp = VoiceResponse()
-    
-    # Just listen. Don't say anything (unless you want a prompt).
     gather = Gather(input='speech', action='/voice/handle-input', timeout=60, speechTimeout='auto')
     resp.append(gather)
     
-    # If we fall through here, it means 60s + 60s = 120s have passed.
-    # Now we hang up.
-    resp.say("I have not heard a response for a while. Disconnecting. Goodbye.")
+    # If 120s total passed:
+    resp.say("I am disconnecting due to inactivity. Goodbye.")
     resp.hangup()
-    
     return Response(content=str(resp), media_type="application/xml")
